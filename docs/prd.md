@@ -588,11 +588,11 @@ System shall:
 
 If n8n webhook execution fails:
 
-1. Retry immediately
-2. Retry after 5 seconds
-3. Retry after 15 seconds
+1. Attempt 1: Immediate
+2. Attempt 2: After 5 seconds
+3. Attempt 3: After 15 seconds
 
-Maximum retries: 3
+Maximum attempts: 3 (initial + 2 retries)
 
 If all retries fail:
 
@@ -769,18 +769,21 @@ Voice Infrastructure Layer
 
 ---
 
-## Pipecat
+## Pipecat Service
 
 Responsibilities:
 
 * Speech-to-Text
-* Intent Extraction
-* Structured Data Extraction
+* Title Extraction
+* Description Extraction
+* Priority Extraction
+* Confidence Generation
+* Callback Delivery
 
 Acts as:
 
 ```text
-AI Processing Layer
+AI Processing Service
 ```
 
 ---
@@ -863,7 +866,7 @@ Resource Ownership
 {
   "sub": "user_uuid",
   "email": "user@example.com",
-  "provider": "google",
+  "provider": "GOOGLE",
   "exp": 9999999999
 }
 ```
@@ -904,12 +907,13 @@ Resource Ownership
 ```sql
 CREATE TABLE users (
     id UUID PRIMARY KEY,
-    email VARCHAR(255) UNIQUE NOT NULL,
-    full_name VARCHAR(255),
+    email VARCHAR(255) NOT NULL UNIQUE,
+    full_name VARCHAR(255) NOT NULL,
     avatar_url TEXT,
-    provider VARCHAR(50),
-    provider_user_id VARCHAR(255) UNIQUE,
-    created_at TIMESTAMP DEFAULT NOW()
+    provider VARCHAR(50) NOT NULL DEFAULT 'GOOGLE',
+    provider_user_id VARCHAR(255) NOT NULL UNIQUE,
+    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMP NOT NULL DEFAULT NOW()
 );
 ```
 
@@ -920,20 +924,16 @@ CREATE TABLE users (
 ```sql
 CREATE TABLE tickets (
     id UUID PRIMARY KEY,
-    user_id UUID REFERENCES users(id),
-
-    ticket_number VARCHAR(50) UNIQUE NOT NULL,
-
-    title TEXT NOT NULL,
+    ticket_number VARCHAR(20) NOT NULL UNIQUE,
+    user_id UUID NOT NULL REFERENCES users(id),
+    title VARCHAR(200) NOT NULL,
     description TEXT NOT NULL,
-
-    priority VARCHAR(20) NOT NULL,
-
-    status VARCHAR(20) NOT NULL,
-
-    source VARCHAR(20) NOT NULL,
-
-    created_at TIMESTAMP DEFAULT NOW()
+    priority ticket_priority NOT NULL,
+    status ticket_status NOT NULL DEFAULT 'OPEN',
+    source ticket_source NOT NULL DEFAULT 'VOICE',
+    correlation_id UUID NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMP NOT NULL DEFAULT NOW()
 );
 ```
 
@@ -969,18 +969,16 @@ VOICE
 ```sql
 CREATE TABLE voice_sessions (
     id UUID PRIMARY KEY,
-
-    user_id UUID REFERENCES users(id) NOT NULL,
-
-    livekit_room_id TEXT,
-
-    transcript TEXT NOT NULL,
-
-    summary TEXT,
-
+    user_id UUID NOT NULL REFERENCES users(id),
     ticket_id UUID REFERENCES tickets(id),
-
-    created_at TIMESTAMP DEFAULT NOW()
+    livekit_room_id VARCHAR(255) NOT NULL,
+    transcript TEXT,
+    status VARCHAR(50) NOT NULL,
+    correlation_id UUID NOT NULL,
+    started_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    completed_at TIMESTAMP,
+    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMP NOT NULL DEFAULT NOW()
 );
 ```
 
@@ -991,20 +989,15 @@ CREATE TABLE voice_sessions (
 ```sql
 CREATE TABLE workflow_runs (
     id UUID PRIMARY KEY,
-
-    ticket_id UUID REFERENCES tickets(id),
-
-    status VARCHAR(50),
-
-    trigger_event TEXT,
-
-    retry_count INTEGER DEFAULT 0,
-
+    ticket_id UUID NOT NULL REFERENCES tickets(id),
+    status workflow_status NOT NULL,
+    trigger_event VARCHAR(100) NOT NULL,
+    retry_count INTEGER NOT NULL DEFAULT 0,
     output_payload JSONB,
-
     error_payload JSONB,
-
-    created_at TIMESTAMP DEFAULT NOW()
+    correlation_id UUID NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMP NOT NULL DEFAULT NOW()
 );
 ```
 
@@ -1015,12 +1008,12 @@ CREATE TABLE workflow_runs (
 ```sql
 CREATE TABLE workflow_events (
     id UUID PRIMARY KEY,
-    workflow_run_id UUID REFERENCES workflow_runs(id),
-
-    event_type VARCHAR(50) NOT NULL,
+    workflow_run_id UUID NOT NULL REFERENCES workflow_runs(id),
+    event_type workflow_event_type NOT NULL,
+    message TEXT,
     event_timestamp TIMESTAMP NOT NULL,
-
-    created_at TIMESTAMP DEFAULT NOW()
+    correlation_id UUID NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT NOW()
 );
 ```
 
@@ -1048,6 +1041,40 @@ EMAIL_SENDING
 EMAIL_SENT
 WORKFLOW_COMPLETED
 WORKFLOW_FAILED
+```
+
+---
+
+# Table: idempotency_keys
+
+```sql
+CREATE TABLE idempotency_keys (
+    id UUID PRIMARY KEY,
+    user_id UUID NOT NULL REFERENCES users(id),
+    endpoint VARCHAR(255) NOT NULL,
+    idempotency_key UUID NOT NULL,
+    response_payload JSONB NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    expires_at TIMESTAMP NOT NULL
+);
+```
+
+## Unique Constraint
+
+```sql
+ALTER TABLE idempotency_keys
+ADD CONSTRAINT uq_idempotency
+UNIQUE (
+    user_id,
+    endpoint,
+    idempotency_key
+);
+```
+
+## Retention
+
+```text
+24 Hours
 ```
 
 ---
@@ -1081,6 +1108,12 @@ voice_sessions
   │ N:1
   ▼
 tickets
+
+users
+  │
+  │ 1:N
+  ▼
+idempotency_keys
 ```
 
 ---
@@ -1103,7 +1136,7 @@ tickets
 - **Workflows (`/api/v1/workflow-runs`)**: Workflow status tracking and event logs.
 - **WebSocket (`/api/v1/ws`)**: Real-time events for transcripts, tickets, and workflow updates.
 - **Internal (`/api/v1/internal`)**: Protected callbacks for Pipecat extraction and n8n webhook status.
-- **Health (`/api/v1/health`)**: Liveness and readiness probes.
+- **Health (`/health`)**: Liveness and readiness probes (outside versioned API namespace).
 
 # LiveKit Integration
 
@@ -1210,11 +1243,17 @@ POST /webhook/ticket-created
 
 ```json
 {
+  "correlation_id": "uuid",
+  "workflow_run_id": "uuid",
   "ticket_id": "uuid",
+  "ticket_number": "TKT-000001",
   "user_id": "uuid",
   "user_email": "user@example.com",
   "title": "Finance Printer Offline",
-  "priority": "HIGH"
+  "description": "Printer unavailable in finance room",
+  "priority": "HIGH",
+  "event": "TICKET_CREATED",
+  "created_at": "2026-06-14T10:00:00Z"
 }
 ```
 
@@ -1348,6 +1387,8 @@ opspilot-ai-lite/
 │   ├── repositories/
 │   └── main.py
 │
+├── pipecat/
+│
 ├── infrastructure/
 │   ├── docker/
 │   ├── postgres/
@@ -1386,7 +1427,46 @@ GOOGLE_CLIENT_SECRET=
 LIVEKIT_API_KEY=
 LIVEKIT_API_SECRET=
 
+PIPECAT_URL=http://pipecat:9000
+
 N8N_WEBHOOK_URL=
+
+INTERNAL_API_KEY=
+
+LLM_PROVIDER=GEMINI
+
+OPENAI_API_KEY=
+GEMINI_API_KEY=
+
+SUPPORT_EMAIL=
+
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USERNAME=
+SMTP_PASSWORD=
+```
+
+LLM_PROVIDER values:
+
+```text
+OPENAI
+GEMINI
+OLLAMA
+```
+
+## Pipecat
+
+```env
+STT_PROVIDER=DEEPGRAM
+
+DEEPGRAM_API_KEY=
+
+LLM_PROVIDER=GEMINI
+
+OPENAI_API_KEY=
+GEMINI_API_KEY=
+
+OLLAMA_URL=http://host.docker.internal:11434
 ```
 
 ---
@@ -2406,6 +2486,7 @@ Provide a fully automated deployment pipeline using:
 * PostgreSQL
 * LiveKit
 * n8n
+* Pipecat Service
 
 The entire platform must be deployable from a single Git push.
 
@@ -2441,16 +2522,16 @@ Internet
     ▼
 Nginx Reverse Proxy
     │
-    ├───────────────┬───────────────┬───────────────┐
-    ▼               ▼               ▼               ▼
+    ├───────────────┬───────────────┬───────────────┬───────────────┐
+    ▼               ▼               ▼               ▼               ▼
 
-Frontend       FastAPI         LiveKit          n8n
-Next.js        Backend
+Frontend          LiveKit          Pipecat        FastAPI          n8n
+Next.js                                           Backend
 
-                    │
-                    ▼
-
-               PostgreSQL
+                                                    │
+                                                    ▼
+                
+                                                PostgreSQL
 ```
 
 ---
@@ -2658,6 +2739,20 @@ livekit
 
 ---
 
+### AI Processing Service
+
+```text
+Pipecat
+```
+
+Container:
+
+```text
+pipecat
+```
+
+---
+
 # Docker Network Design
 
 Single network.
@@ -2723,6 +2818,7 @@ opspilot-ai-lite
 
 ├── frontend
 ├── backend
+├── pipecat
 ├── infrastructure
 ├── .github
 ├── docs
@@ -3155,7 +3251,11 @@ Response:
 
 ```json
 {
-  "status": "healthy"
+  "status": "healthy",
+  "services": {
+    "database": "healthy"
+  },
+  "timestamp": "2026-06-14T10:00:00Z"
 }
 ```
 

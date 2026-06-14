@@ -326,21 +326,17 @@ participant FastAPI
 participant n8n
 participant PostgreSQL
 
-FastAPI->>n8n: Trigger Workflow
+FastAPI->>n8n: Attempt 1 (Immediate)
 
 n8n--xFastAPI: Attempt 1 Failed
 
-FastAPI->>n8n: Retry Immediately
+FastAPI->>n8n: Attempt 2 (After 5 Seconds)
 
 n8n--xFastAPI: Attempt 2 Failed
 
-FastAPI->>n8n: Retry After 5 Seconds
+FastAPI->>n8n: Attempt 3 (After 15 Seconds)
 
 n8n--xFastAPI: Attempt 3 Failed
-
-FastAPI->>n8n: Retry After 15 Seconds
-
-n8n--xFastAPI: Failed
 
 FastAPI->>PostgreSQL: Workflow=FAILED
 

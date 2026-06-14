@@ -583,7 +583,7 @@ GOOGLE
 # Authentication Provider
 
 ```text
-google
+GOOGLE
 ```
 
 ---
@@ -765,7 +765,7 @@ Persist:
 {
   "sub": "user_uuid",
   "email": "user@example.com",
-  "provider": "google",
+  "provider": "GOOGLE",
   "exp": 9999999999
 }
 ```
@@ -1239,18 +1239,22 @@ Required
 ```text
 Voice Request
       ↓
-OPEN
+OPEN (ticket created)
       ↓
-Workflow Running
+Workflow status = RUNNING
       ↓
-IN_PROGRESS
+IN_PROGRESS (ticket updated when workflow starts running)
       ↓
-Workflow Completed
+Workflow status = COMPLETED
       ↓
-COMPLETED
+COMPLETED (ticket updated when workflow completes)
 ```
 
-Workflow failures do NOT update ticket status.
+## Ticket Status Transition Rules
+
+- **OPEN → IN_PROGRESS**: When the associated workflow run transitions to `RUNNING` (n8n webhook accepted).
+- **IN_PROGRESS → COMPLETED**: When the associated workflow run transitions to `COMPLETED` (n8n callback received with success).
+- **Workflow failure**: Ticket remains in its current status (`OPEN` or `IN_PROGRESS`). Workflow failures do NOT revert or advance ticket status.
 
 ---
 
@@ -2898,7 +2902,9 @@ FOREIGN KEY(ticket_id)
 
 ```text id="m2q7fj"
 user_id
-transcript
+livekit_room_id
+status
+correlation_id
 ```
 
 ---
@@ -2939,12 +2945,12 @@ FAILED
 ```sql id="h4f9pc"
 CREATE TABLE workflow_events (
     id UUID PRIMARY KEY,
-    workflow_run_id UUID REFERENCES workflow_runs(id),
-
-    event_type VARCHAR(50) NOT NULL,
+    workflow_run_id UUID NOT NULL REFERENCES workflow_runs(id),
+    event_type workflow_event_type NOT NULL,
+    message TEXT,
     event_timestamp TIMESTAMP NOT NULL,
-
-    created_at TIMESTAMP DEFAULT NOW()
+    correlation_id UUID NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT NOW()
 );
 ```
 
