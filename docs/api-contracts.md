@@ -904,6 +904,27 @@ Workflow Trigger
 
 ---
 
+# Voice Session State Machine
+
+```
+CREATED
+   ↓
+CONNECTED
+   ↓
+RECORDING
+   ↓
+PROCESSING
+   ↓
+COMPLETED
+
+Failure States
+
+CONNECTED → TIMEOUT
+PROCESSING → FAILED
+```
+
+---
+
 # 11.1 Create Voice Session
 
 ## Endpoint
@@ -993,7 +1014,14 @@ RATE_LIMIT_EXCEEDED
 ```http
 POST /api/v1/voice/sessions/{session_id}/complete
 ```
-
+{
+  "success": true,
+  "correlation_id": "uuid",
+  "data": {
+    "session_id": "uuid",
+    "status": "PROCESSING"
+  }
+}
 ---
 
 ## Authentication
@@ -1061,15 +1089,20 @@ Required
 ```text
 Store Transcript
       ↓
-Pipecat Extraction
+Mark Session PROCESSING
+      ↓
+Forward Transcript To Pipecat
+      ↓
+Await Callback
+      ↓
+Pipecat Callback Received
       ↓
 Create Ticket
       ↓
 Create Workflow Run
       ↓
 Trigger n8n
-      ↓
-Return Result
+
 ```
 
 ---
@@ -1492,15 +1525,23 @@ Provide dashboard activity timeline.
 # Workflow Lifecycle
 
 ```text
-Ticket Created
-      ↓
-Workflow Run Created
-      ↓
 PENDING
-      ↓
+    ↓
+Successful n8n Webhook Acceptance
+    ↓
 RUNNING
-      ↓
-COMPLETED / FAILED
+    ↓
+n8n Callback COMPLETED
+    ↓
+COMPLETED
+
+OR
+
+RUNNING
+    ↓
+n8n Callback FAILED
+    ↓
+FAILED
 ```
 
 ---
@@ -1748,23 +1789,6 @@ No broadcasting.
 
 ---
 
-## TRANSCRIPT_UPDATED
-
-### Payload
-
-```json
-{
-  "event": "TRANSCRIPT_UPDATED",
-  "correlation_id": "uuid",
-  "payload": {
-    "session_id": "uuid",
-    "transcript": "The printer in finance room..."
-  }
-}
-```
-
----
-
 ## TICKET_CREATED
 
 ### Payload
@@ -1873,9 +1897,16 @@ Page refresh restores state via REST APIs.
 # Security
 
 Required Header:
+Shared secret used by:
 
 ```http
-X-Internal-API-Key
+
+Pipecat Callback
+Workflow Callback (n8n)
+
+Configured via:
+
+INTERNAL_API_KEY
 ```
 
 ---
@@ -1888,7 +1919,100 @@ X-Internal-API-Key
 
 ---
 
-# 15.1 Pipecat Extraction Callback
+# 15.0 Pipecat Processing Request
+
+## Purpose
+
+Submit completed transcript to Pipecat for AI extraction.
+
+---
+
+## Direction
+
+```text
+FastAPI
+    ↓
+Pipecat
+```
+
+---
+
+## Authentication
+
+Required Header:
+
+```http
+X-Internal-API-Key
+```
+
+---
+
+## Request
+
+```json
+{
+  "correlation_id": "uuid",
+  "session_id": "uuid",
+  "transcript": "The printer in finance room is offline and requires urgent maintenance.",
+  "callback_url": "https://api.opspilot.akirasi.in/api/v1/internal/pipecat/extraction"
+}
+```
+
+---
+
+## Processing Rules
+
+Pipecat must:
+
+```text
+Receive Transcript
+Extract Title
+Extract Description
+Extract Priority
+Generate Confidence Score
+Call Callback Endpoint
+```
+
+---
+
+## Callback Target
+
+```http
+POST /api/v1/internal/pipecat/extraction
+```
+
+---
+
+## Expected Response
+
+```json
+{
+  "accepted": true
+}
+```
+
+---
+
+## Failure Handling
+
+If Pipecat is unavailable:
+
+```text
+voice_session.status = FAILED
+```
+
+Create application log entry including:
+
+```text
+correlation_id
+session_id
+error_message
+timestamp
+```
+
+---
+
+# 15.1 Pipecat Extraction Result Callback
 
 ## Endpoint
 
@@ -1896,6 +2020,26 @@ X-Internal-API-Key
 POST /api/v1/internal/pipecat/extraction
 ```
 
+## Processing Rules
+
+```
+Lookup Voice Session
+Validate Session Exists
+Validate Session Status = PROCESSING
+
+Create Ticket
+Generate Ticket Number
+
+Link Ticket To Voice Session
+
+Create Workflow Run
+
+Trigger n8n
+
+Emit TICKET_CREATED Event
+
+Emit WORKFLOW_UPDATED Event
+```
 ---
 
 ## Purpose
@@ -3185,7 +3329,13 @@ POST /voice/sessions/{id}/complete
 Store Transcript
  │
  ▼
-Pipecat Extraction
+Send Transcript To Pipecat
+ │
+ ▼
+Pipecat Processing
+ │
+ ▼
+Pipecat Callback
  │
  ▼
 Create Ticket

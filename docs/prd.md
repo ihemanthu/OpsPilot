@@ -1660,6 +1660,12 @@ Dashboard must not render unless user is authenticated.
 
 ---
 
+Dashboard establishes WebSocket connection immediately after successful authentication.
+
+Connection remains active throughout session.
+
+Voice sessions do not create separate WebSocket connections.
+
 ## Automatic Processing
 
 No manual review step.
